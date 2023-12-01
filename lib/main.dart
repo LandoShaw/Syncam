@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
-
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:lan_scanner/lan_scanner.dart';
@@ -14,30 +13,199 @@ import 'package:network_info_plus/network_info_plus.dart';
 // Future<void> main() async {
 // // Ensure that plugin services are initialized so that `availableCameras()`
 // // can be called before `runApp()`
-// WidgetsFlutterBinding.ensureInitialized();
+//   WidgetsFlutterBinding.ensureInitialized();
 
 // // Obtain a list of the available cameras on the device.
-// final cameras = await availableCameras();
+//   final cameras = await availableCameras();
 
 // // Get a specific camera from the list of available cameras.
-// final firstCamera = cameras.first;
+//   final firstCamera = cameras.first;
 
-// runApp(
-//   MaterialApp(
-//     theme: ThemeData.dark(),
-//     home: TakePictureScreen(
-//       // Pass the appropriate camera to the TakePictureScreen widget.
-//       camera: firstCamera,
+//   runApp(
+//     MaterialApp(
+//       theme: ThemeData.dark(),
+//       home: TakePictureScreen(
+//         // Pass the appropriate camera to the TakePictureScreen widget.
+//         camera: firstCamera,
+//       ),
 //     ),
-//   ),
-// );
+//   );
 // }
 
-void main() {
-  runApp(Connections());
+void main() async {
+  // Ensure that plugin services are initialized so that `availableCameras()`
+  // can be called before `runApp()`
+  WidgetsFlutterBinding.ensureInitialized();
+  // Get device's list of cameras
+  final cameras = await availableCameras();
+  // Grab first camera
+  final firstCamera = cameras.first;
+  runApp(MainScreenWidget(camera: firstCamera));
 }
 
-// class Connections extends StatelessWidget {
+class MainScreenWidget extends StatefulWidget {
+  const MainScreenWidget({
+    super.key,
+    required this.camera,
+  });
+  final CameraDescription camera;
+  @override
+  MainScreenWidgetState createState() => MainScreenWidgetState();
+}
+
+class MainScreenWidgetState extends State<MainScreenWidget> {
+  late CameraController _controller; //intialize camera
+  late Future<void> _initializeControllerFuture; //chech this before using cam
+
+  @override
+  void initState() {
+    super.initState();
+    initializeCamera();
+  }
+
+  @override
+  void dispose() {
+    // Dispose of the controller when the widget is disposed.
+    _controller.dispose();
+    super.dispose();
+  }
+
+  initializeCamera() async {
+    // Create a CameraController.
+    _controller = CameraController(
+      widget.camera,
+      ResolutionPreset.medium,
+    );
+    // Init the controller. This returns a Future.
+    _initializeControllerFuture = _controller.initialize();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(title: const Text('Home Screen')),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Builder(
+                builder: (context) => ElevatedButton(
+                  onPressed: () {
+                    // Handle button 1 press
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (context) => HostWidget()),
+                    );
+                  },
+                  child: Text('Launch as Host'),
+                ),
+              ),
+              SizedBox(height: 16.0), // Optional spacing
+              ElevatedButton(
+                onPressed: () {
+                  // Handle button 2 press
+                },
+                child: Text('Launch as Client'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class HostWidget extends StatefulWidget {
+  const HostWidget({
+    super.key,
+  });
+  @override
+  HostWidgetState createState() => HostWidgetState();
+}
+
+class HostWidgetState extends State<HostWidget> {
+  final int portNum = 49153;
+  late Future<String> ip;
+
+  // final port = 80;
+  // int iPinitial = 1;
+  // int iPfinal = 255; // will check up until this address
+  // final scanner = LanScanner();
+  // List<String> addresses = [];
+
+  @override
+  void initState() {
+    super.initState();
+
+    getIP().then((String ip) {
+      establishTCPServerSocket(ip, portNum);
+    });
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  Future<String> getIP() async {
+    final wifiIP = await NetworkInfo().getWifiIP();
+    if (wifiIP != null) {
+      return wifiIP;
+    } else {
+      return "IP not found"; // Return null if wifiIP is null.
+    }
+  }
+
+  void establishTCPServerSocket(ip, portNum) async {
+    final server = await ServerSocket.bind(ip, portNum);
+    print('Server listening on ${server.address}:${server.port}');
+    //runs indefintely
+    await for (var socket in server) {
+      //white board here
+
+      handleClient(socket);
+    }
+  }
+
+  void handleClient(Socket client) {
+    print('Client connected: ${client.remoteAddress}:${client.remotePort}');
+
+    client.listen(
+      (List<int> data) {
+        String message = utf8.decode(data);
+        print('Received message: $message');
+
+        // Process the received data or send a response
+        // For example, echoing the message back to the client:
+        print('Replied: SUCCESS');
+        client.write('SUCCESS');
+      },
+      onDone: () {
+        print(
+            'Client disconnected: ${client.remoteAddress}:${client.remotePort}');
+        client.close();
+      },
+      onError: (error) {
+        print('Error: $error');
+        client.close();
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(title: const Text('Host Launch')),
+        body: Center(),
+      ),
+    );
+  }
+}
+
+//Basic Version (works)
+// class MainScreen extends StatelessWidget {
 //   @override
 //   Widget build(BuildContext context) {
 //     return MaterialApp(
@@ -50,9 +218,9 @@ void main() {
 //       ),
 //     );
 //   }
-// }
+// }  //make stateful
 
-class Connections extends StatelessWidget {
+class connections extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -65,13 +233,13 @@ class Connections extends StatelessWidget {
           children: [
             ElevatedButton(
               onPressed: () {
-                MyLanScannerWidget(isHost: true); // Master
+                // MyLanScannerWidget(isHost: true); // Master
               },
               child: Text('Launch as Master'),
             ),
             ElevatedButton(
               onPressed: () {
-                MyLanScannerWidget(isHost: false); // Servant
+                // MyLanScannerWidget(isHost: false); // Servant
               },
               child: Text('Launch as Servant'),
             ),
@@ -83,15 +251,16 @@ class Connections extends StatelessWidget {
 }
 
 class MyLanScannerWidget extends StatefulWidget {
-  final bool isHost; // Add parameter to determine if it's a host or client
+  // final bool isHost; // Add parameter to determine if it's a host or client
 
   const MyLanScannerWidget({
     super.key,
-    required this.isHost,
+    // required this.isHost,
   });
 
   @override
-  MyLanScannerWidgetState createState() => MyLanScannerWidgetState(isHost);
+  MyLanScannerWidgetState createState() =>
+      MyLanScannerWidgetState(); //(isHost);
 }
 
 class MyLanScannerWidgetState extends State<MyLanScannerWidget> {
@@ -99,8 +268,8 @@ class MyLanScannerWidgetState extends State<MyLanScannerWidget> {
   the "@override Widget build(BuildContext context)" function below 
   has access to the variables declared here. */
 
-  final bool isHost;
-  MyLanScannerWidgetState(this.isHost);
+  // final bool isHost;
+  // MyLanScannerWidgetState(this.isHost);
 
   final port = 80;
   int iPinitial = 1;
@@ -260,34 +429,34 @@ class MyLanScannerWidgetState extends State<MyLanScannerWidget> {
       appBar: AppBar(title: const Text('Find Local Network Devices')),
       floatingActionButton: FloatingActionButton(
         onPressed: () async {
-          if (isHost) {
-            setState(() {
-              displayText = 'Running Master'; // Change this text as needed
-            });
-            print("Master");
-          } else {
-            setState(() {
-              displayText = 'Running Servant'; // Change this text as needed
-            });
-            print("Servant");
-          }
+          // if (isHost) {
+          //   setState(() {
+          //     displayText = 'Running Master'; // Change this text as needed
+          //   });
+          //   print("Master");
+          // } else {
+          //   setState(() {
+          //     displayText = 'Running Servant'; // Change this text as needed
+          //   });
+          //   print("Servant");
+          // }
 
-          // establishTCPClientSocket();
-          // setState(() {
-          //   displayText = 'Client Running'; // Change this text as needed
-          // });
+          establishTCPClientSocket();
+          setState(() {
+            displayText = 'Client Running'; // Change this text as needed
+          });
 
           //right here make an if-else statement based on the Host/Client argument.
 
-          // setState(() {
-          //   displayText =
-          //       'Searching for devices.'; // Change this text as needed
-          // });
-          // addresses = await findLocalDevices();
-          // print("Addresses: $addresses");
-          // setState(() {
-          //   displayText = 'Devices Found.'; // Change this text as needed
-          // });
+          setState(() {
+            displayText =
+                'Searching for devices.'; // Change this text as needed
+          });
+          addresses = await findLocalDevices();
+          print("Addresses: $addresses");
+          setState(() {
+            displayText = 'Devices Found.'; // Change this text as needed
+          });
         },
         child: const Icon(Icons.wifi_calling_3_sharp),
       ),
@@ -323,8 +492,7 @@ class TakePictureScreenState extends State<TakePictureScreen> {
     _controller = CameraController(
       // Get a specific camera from the list of available cameras.
       widget.camera,
-      // Define the resolution to use.
-      ResolutionPreset.medium,
+      ResolutionPreset.medium, // Define the resolution to use.
     );
 
     // Next, initialize the controller. This returns a Future.
