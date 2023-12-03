@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:lan_scanner/lan_scanner.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
+import 'package:connectivity/connectivity.dart';
+
 // import 'package:network_discovery/network_discovery.dart';
 
 // import 'package:dart_discover/dart_discover.dart';
@@ -95,18 +97,32 @@ class MainScreenWidgetState extends State<MainScreenWidget> {
                     // Handle button 1 press
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (context) => HostWidget()),
+                      MaterialPageRoute(
+                          builder: (context) => HostWidget(
+                              controller: _controller,
+                              initializeControllerFuture:
+                                  _initializeControllerFuture)),
                     );
                   },
                   child: Text('Launch as Host'),
                 ),
               ),
               SizedBox(height: 16.0), // Optional spacing
-              ElevatedButton(
-                onPressed: () {
-                  // Handle button 2 press
-                },
-                child: Text('Launch as Client'),
+              Builder(
+                builder: (context) => ElevatedButton(
+                  onPressed: () {
+                    // Handle button 1 press
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (context) => ClientWidget(
+                              controller: _controller,
+                              initializeControllerFuture:
+                                  _initializeControllerFuture)),
+                    );
+                  },
+                  child: Text('Launch as Client'),
+                ),
               ),
             ],
           ),
@@ -119,7 +135,12 @@ class MainScreenWidgetState extends State<MainScreenWidget> {
 class HostWidget extends StatefulWidget {
   const HostWidget({
     super.key,
+    required this.controller,
+    required this.initializeControllerFuture,
   });
+  final CameraController controller;
+  final Future initializeControllerFuture;
+
   @override
   HostWidgetState createState() => HostWidgetState();
 }
@@ -127,18 +148,17 @@ class HostWidget extends StatefulWidget {
 class HostWidgetState extends State<HostWidget> {
   final int portNum = 49153;
   late Future<String> ip;
-
-  // final port = 80;
-  // int iPinitial = 1;
-  // int iPfinal = 255; // will check up until this address
-  // final scanner = LanScanner();
-  // List<String> addresses = [];
-
+  final List<Socket> clientSockets = [];
+/*
+  in future: if 1) new client connects and 2) 'take-pic' cmd is being 
+  sent out at the same time, both will be accessing clientSockets.  Possible 
+  point of failure, possible semaphore needed.
+*/
   @override
   void initState() {
     super.initState();
 
-    getIP().then((String ip) {
+    getLocalWifiIp().then((String ip) {
       establishTCPServerSocket(ip, portNum);
     });
   }
@@ -146,15 +166,22 @@ class HostWidgetState extends State<HostWidget> {
   @override
   void dispose() {
     super.dispose();
+    //close all TCP connections
   }
 
-  Future<String> getIP() async {
-    final wifiIP = await NetworkInfo().getWifiIP();
-    if (wifiIP != null) {
-      return wifiIP;
-    } else {
-      return "IP not found"; // Return null if wifiIP is null.
-    }
+/*
+  returns the IP address within the local wifi hotspot.
+  Note:
+  'NetworkInterface.list()' gets all addresses of network interface.  This includes
+  the call iP address (2 of them somehow) and the Wifi Hotspot one.  If the cellular 
+  is disconnected/off, then the only one is the wifi hotspot one. Thus its handled.
+  i.e. the Wifi hotspot seems to take the final location in the returned address array.
+*/
+  Future<String> getLocalWifiIp() async {
+    List<NetworkInterface> interfaces =
+        await NetworkInterface.list(type: InternetAddressType.IPv4);
+    int len = interfaces.length;
+    return interfaces[len - 1].addresses[0].address;
   }
 
   void establishTCPServerSocket(ip, portNum) async {
@@ -162,24 +189,57 @@ class HostWidgetState extends State<HostWidget> {
     print('Server listening on ${server.address}:${server.port}');
     //runs indefintely
     await for (var socket in server) {
-      //white board here
-
-      handleClient(socket);
+      clientSockets.add(socket);
     }
   }
 
-  void handleClient(Socket client) {
-    print('Client connected: ${client.remoteAddress}:${client.remotePort}');
+  void sendClientCaptureCmds(List<Socket> clientSockets) {
+    /* eventuall functionality 
+      //things we will receive from client? 
+      // 1) time of flight
+      // 2) images
+    */
+
+    for (var socket in clientSockets) {
+      String message = 'cmd:takepic';
+      socket.write(message);
+      socket.close();
+    }
+  }
+
+  void takeLocalPicture() async {
+    try {
+      await widget.initializeControllerFuture; // camera init'd?
+      final image = await widget.controller.takePicture();
+      if (!mounted) return;
+
+      await Navigator.of(context).push(
+        //if captured, display
+        MaterialPageRoute(
+          builder: (context) => DisplayPictureScreen(
+            // Pass the automatically generated path to the DisplayPictureScreen widget.
+            imagePath: image.path,
+          ),
+        ),
+      );
+    } catch (e) {
+      print(e);
+    }
+  }
+
+/*
+checkRoundTripTimeClient must also be 'enabled'
+*/
+  void checkRoundTripTimeHost(Socket client) {
+    final stopwatch = Stopwatch()..start();
+    client.write("t");
 
     client.listen(
       (List<int> data) {
         String message = utf8.decode(data);
-        print('Received message: $message');
-
-        // Process the received data or send a response
-        // For example, echoing the message back to the client:
-        print('Replied: SUCCESS');
-        client.write('SUCCESS');
+        print("Message Received");
+        stopwatch.stop();
+        print('Elapsed time: ${stopwatch.elapsedMilliseconds} milliseconds');
       },
       onDone: () {
         print(
@@ -198,7 +258,165 @@ class HostWidgetState extends State<HostWidget> {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(title: const Text('Host Launch')),
-        body: Center(),
+        body: FutureBuilder<void>(
+          future: widget.initializeControllerFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.done) {
+              // If the Future is complete, display the preview.
+              return CameraPreview(widget.controller);
+            } else {
+              // Otherwise, display a loading indicator.
+              return const Center(child: CircularProgressIndicator());
+            }
+          },
+        ),
+        floatingActionButton: FloatingActionButton(
+          // Provide an onPressed callback.
+          onPressed: () async {
+            // sendClientCaptureCmds(clientSockets);
+            // takeLocalPicture();
+            checkRoundTripTimeHost(clientSockets[0]);
+          },
+          child: const Icon(Icons.camera_alt),
+        ),
+      ),
+    );
+  }
+}
+
+class ClientWidget extends StatefulWidget {
+  const ClientWidget({
+    super.key,
+    required this.controller,
+    required this.initializeControllerFuture,
+  });
+  final CameraController controller;
+  final Future initializeControllerFuture;
+  @override
+  ClientWidgetState createState() => ClientWidgetState();
+}
+
+class ClientWidgetState extends State<ClientWidget> {
+  late Future<String> defaultGateway;
+  final int serverPort = 49153;
+  late Future<Socket?> hostSocket;
+
+  @override
+  void initState() {
+    super.initState();
+    defaultGateway = getGateway();
+    hostSocket = establishTCPClientSocket();
+    // checkRoundTripTimeClient();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+    //close all TCP connections
+  }
+
+  Future<String> getGateway() async {
+    //finding the default gateway requires native android code (kotlin)
+    //to save time, we are manually coding the default gateway
+    return "192.168.81.104";
+  }
+
+  void handleHostCaptureCmd() async {
+    takeLocalPicture();
+  }
+
+  void takeLocalPicture() async {
+    try {
+      await widget.initializeControllerFuture; // camera init'd?
+      final image = await widget.controller.takePicture();
+      if (!mounted) return;
+
+      await Navigator.of(context).push(
+        //if captured, display
+        MaterialPageRoute(
+          builder: (context) => DisplayPictureScreen(
+            // Pass the automatically generated path to the DisplayPictureScreen widget.
+            imagePath: image.path,
+          ),
+        ),
+      );
+    } catch (e) {
+      print(e);
+    }
+  }
+
+  void checkRoundTripTimeClient() async {
+    // connects to host, listens, returns message as soon as one is received.
+    // might not work (maybe)
+    try {
+      Socket hostSocket = await Socket.connect(defaultGateway, serverPort);
+      print("client socket created");
+      hostSocket.listen(
+        (List<int> data) async {
+          hostSocket.write("t");
+          await hostSocket.flush();
+          hostSocket.destroy(); // Host closed connection
+        },
+        onDone: () {
+          hostSocket.destroy(); // Host closed connection
+        },
+        onError: (error) {
+          print('Error: $error');
+          hostSocket.destroy();
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      print('Error connecting to the server: $e');
+    }
+  }
+
+  void listenForHostCmds(Socket hostSocket) {
+    hostSocket.listen(
+      (List<int> data) async {
+        String receivedData = String.fromCharCodes(data);
+        print('Command: $receivedData');
+        handleHostCaptureCmd();
+      },
+      onDone: () {
+        hostSocket.destroy(); // Host closed connection
+      },
+      onError: (error) {
+        print('Error: $error');
+        hostSocket.destroy();
+      },
+      cancelOnError: true,
+    );
+  }
+
+//remove the listeing part from this and put in its own section
+  Future<Socket?> establishTCPClientSocket() async {
+    try {
+      Socket hostSocket = await Socket.connect(defaultGateway, serverPort);
+      print("client socket created");
+      return hostSocket;
+    } catch (e) {
+      print('Error connecting to the server: $e');
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(title: const Text('Client Launch')),
+        body: FutureBuilder<void>(
+          future: widget.initializeControllerFuture,
+          builder: (context, snapshot) {
+            //display when preview done loading
+            if (snapshot.connectionState == ConnectionState.done) {
+              return CameraPreview(widget.controller);
+            } else {
+              return const Center(child: CircularProgressIndicator());
+            }
+          },
+        ),
       ),
     );
   }

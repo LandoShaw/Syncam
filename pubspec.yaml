@@ -39,13 +39,14 @@ dependencies:
   path_provider: ^2.1.1
   path: ^1.8.3
   
-  lan_scanner: ^2.0.0
+  lan_scanner: ^2.0.0  # likely not needed
   
-  network_info_plus: ^4.1.0
+  network_info_plus: ^4.1.0  #not sure if used
 
-  network_discovery: ^1.0.0
+  network_discovery: ^1.0.0 # not sure if used
 
-  # dart_discover: ^2.0.3
+  connectivity: ^3.0.6  
+# dart_discover: ^2.0.3
 
 
 dev_dependencies:
