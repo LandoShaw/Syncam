@@ -281,8 +281,7 @@ class HostWidgetState extends State<HostWidget> {
     */
     DateTime now = DateTime.now();
     DateTime withDelay = now.add(halfRTT);
-    DateTime withDelayDelay = withDelay.add(Duration(milliseconds: 500));
-
+    DateTime withDelayDelay = withDelay.add(Duration(milliseconds: 1000));
     return withDelayDelay;
   }
 
@@ -327,6 +326,9 @@ class HostWidgetState extends State<HostWidget> {
                 DateTime triggerTime = getCaptureTime();
                 print(triggerTime);
                 sendClientCaptureCmds(clientSockets, triggerTime);
+                triggerTime = triggerTime.subtract(Duration(milliseconds: 840));
+                // remove some delay time to account for the capture mechanism. Make a function later.
+
                 waitUntilCaptureTime(triggerTime);
                 takeLocalPicture();
               },
