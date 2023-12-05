@@ -46,6 +46,8 @@ dependencies:
   network_discovery: ^1.0.0 # not sure if used
 
   connectivity: ^3.0.6  
+
+  ntp: ^2.0.0
 # dart_discover: ^2.0.3
 
 

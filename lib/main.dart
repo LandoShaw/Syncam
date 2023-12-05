@@ -94,7 +94,6 @@ class MainScreenWidgetState extends State<MainScreenWidget> {
               Builder(
                 builder: (context) => ElevatedButton(
                   onPressed: () {
-                    // Handle button 1 press
                     Navigator.push(
                       context,
                       MaterialPageRoute(
@@ -149,11 +148,22 @@ class HostWidgetState extends State<HostWidget> {
   final int portNum = 49153;
   late Future<String> ip;
   final List<Socket> clientSockets = [];
-/*
+  Stopwatch rttClock = Stopwatch();
+  Duration halfRTT = Duration.zero;
+
+/*  Future Notes:
   in future: if 1) new client connects and 2) 'take-pic' cmd is being 
   sent out at the same time, both will be accessing clientSockets.  Possible 
   point of failure, possible semaphore needed.
+
+  long-term additionaly functionality
+  when the rttCmd is sent out, it disables the capture button,
+  when it is received it renables the capture button.
+
+  short-term:
+  for now, we just give it a moment before hitting capture, after hitting sync
 */
+
   @override
   void initState() {
     super.initState();
@@ -169,15 +179,15 @@ class HostWidgetState extends State<HostWidget> {
     //close all TCP connections
   }
 
-/*
+  Future<String> getLocalWifiIp() async {
+    /*
   returns the IP address within the local wifi hotspot.
   Note:
   'NetworkInterface.list()' gets all addresses of network interface.  This includes
   the call iP address (2 of them somehow) and the Wifi Hotspot one.  If the cellular 
   is disconnected/off, then the only one is the wifi hotspot one. Thus its handled.
   i.e. the Wifi hotspot seems to take the final location in the returned address array.
-*/
-  Future<String> getLocalWifiIp() async {
+  */
     List<NetworkInterface> interfaces =
         await NetworkInterface.list(type: InternetAddressType.IPv4);
     int len = interfaces.length;
@@ -189,21 +199,59 @@ class HostWidgetState extends State<HostWidget> {
     print('Server listening on ${server.address}:${server.port}');
     //runs indefintely
     await for (var socket in server) {
-      clientSockets.add(socket);
+      clientResponseHandler(socket);
     }
   }
 
-  void sendClientCaptureCmds(List<Socket> clientSockets) {
+  void sendRTTCmd(Socket client) {
+    rttClock.start();
+    client.write("getRTT");
+  }
+
+  void receiveRTTResponse() {
+    rttClock.stop();
+    int intHalfRTT = (rttClock.elapsedMilliseconds / 2).toInt();
+    halfRTT = Duration(milliseconds: intHalfRTT);
+    print('Elapsed time: $halfRTT');
+    rttClock.reset();
+  }
+
+  void clientResponseHandler(Socket client) {
+    clientSockets.add(client);
+    client.listen(
+      (List<int> data) async {
+        String givenResponse = String.fromCharCodes(data);
+        print('Response: $givenResponse');
+
+        switch (givenResponse) {
+          case "RTT":
+            receiveRTTResponse();
+          default:
+            print("response case not found");
+        }
+      },
+      onDone: () {
+        client.destroy(); // Client closed connection
+      },
+      onError: (error) {
+        print('Error: $error');
+        client.destroy();
+      },
+      cancelOnError: true,
+    );
+  }
+
+  void sendClientCaptureCmds(List<Socket> clientSockets, DateTime triggerTime) {
     /* eventuall functionality 
       //things we will receive from client? 
       // 1) time of flight
       // 2) images
     */
 
+    String triggerString = triggerTime.toUtc().toIso8601String();
+
     for (var socket in clientSockets) {
-      String message = 'cmd:takepic';
-      socket.write(message);
-      socket.close();
+      socket.write(triggerString);
     }
   }
 
@@ -227,30 +275,31 @@ class HostWidgetState extends State<HostWidget> {
     }
   }
 
-/*
-checkRoundTripTimeClient must also be 'enabled'
-*/
-  void checkRoundTripTimeHost(Socket client) {
-    final stopwatch = Stopwatch()..start();
-    client.write("t");
+  DateTime getCaptureTime() {
+    /*
+      takes the current time, adds halfRTT and returns that.
+    */
+    DateTime now = DateTime.now();
+    DateTime withDelay = now.add(halfRTT);
+    DateTime withDelayDelay = withDelay.add(Duration(milliseconds: 500));
 
-    client.listen(
-      (List<int> data) {
-        String message = utf8.decode(data);
-        print("Message Received");
-        stopwatch.stop();
-        print('Elapsed time: ${stopwatch.elapsedMilliseconds} milliseconds');
-      },
-      onDone: () {
-        print(
-            'Client disconnected: ${client.remoteAddress}:${client.remotePort}');
-        client.close();
-      },
-      onError: (error) {
-        print('Error: $error');
-        client.close();
-      },
-    );
+    return withDelayDelay;
+  }
+
+  void waitUntilCaptureTime(DateTime triggerTime) {
+    /*
+      takes triggerTime and waits until that time has passed before returning. 
+      make sure you have used the sync button at least once.
+      make a version that uses future completion? Because this is synchronous code.
+    */
+
+    DateTime newNow = DateTime.now();
+    print("begin waiting");
+    while (triggerTime.isAfter(newNow)) {
+      print("waiting");
+      newNow = DateTime.now();
+    }
+    return;
   }
 
   @override
@@ -261,23 +310,36 @@ checkRoundTripTimeClient must also be 'enabled'
         body: FutureBuilder<void>(
           future: widget.initializeControllerFuture,
           builder: (context, snapshot) {
+            //display preview when done loading
             if (snapshot.connectionState == ConnectionState.done) {
-              // If the Future is complete, display the preview.
               return CameraPreview(widget.controller);
             } else {
-              // Otherwise, display a loading indicator.
               return const Center(child: CircularProgressIndicator());
             }
           },
         ),
-        floatingActionButton: FloatingActionButton(
-          // Provide an onPressed callback.
-          onPressed: () async {
-            // sendClientCaptureCmds(clientSockets);
-            // takeLocalPicture();
-            checkRoundTripTimeHost(clientSockets[0]);
-          },
-          child: const Icon(Icons.camera_alt),
+        floatingActionButton: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            FloatingActionButton(
+              heroTag: 'captureButton', // Unique tag for the first button
+              onPressed: () async {
+                DateTime triggerTime = getCaptureTime();
+                print(triggerTime);
+                sendClientCaptureCmds(clientSockets, triggerTime);
+                waitUntilCaptureTime(triggerTime);
+                takeLocalPicture();
+              },
+              child: const Icon(Icons.camera_alt),
+            ),
+            FloatingActionButton(
+              heroTag: 'syncButton', // Unique tag for the second button
+              onPressed: () {
+                sendRTTCmd(clientSockets[0]);
+              },
+              child: const Icon(Icons.sync_alt),
+            ),
+          ],
         ),
       ),
     );
@@ -299,14 +361,18 @@ class ClientWidget extends StatefulWidget {
 class ClientWidgetState extends State<ClientWidget> {
   late Future<String> defaultGateway;
   final int serverPort = 49153;
-  late Future<Socket?> hostSocket;
+  late Socket? hostSocket;
 
   @override
   void initState() {
     super.initState();
-    defaultGateway = getGateway();
-    hostSocket = establishTCPClientSocket();
-    // checkRoundTripTimeClient();
+    defaultGateway = getGateway(); //needs async eventually
+    establishTCPClientSocket().then((Socket? host) {
+      if (host != null) {
+        hostSocket = host; //necessary? not right now
+        listenForHostCmds(host);
+      }
+    });
   }
 
   @override
@@ -321,8 +387,24 @@ class ClientWidgetState extends State<ClientWidget> {
     return "192.168.81.104";
   }
 
-  void handleHostCaptureCmd() async {
+  void handleHostCaptureCmd(DateTime triggerTime) async {
+    waitUntilCaptureTime(triggerTime);
     takeLocalPicture();
+  }
+
+  void waitUntilCaptureTime(DateTime triggerTime) {
+    /*
+      takes triggerTime and waits until that time has passed before returning. 
+      make sure you have used the sync button at least once.
+      make a version that uses future completion? Because this is synchronous code.
+    */
+    DateTime newNow = DateTime.now();
+    print("begin waiting");
+    while (triggerTime.isAfter(newNow)) {
+      print("waiting");
+      newNow = DateTime.now();
+    }
+    return;
   }
 
   void takeLocalPicture() async {
@@ -345,38 +427,25 @@ class ClientWidgetState extends State<ClientWidget> {
     }
   }
 
-  void checkRoundTripTimeClient() async {
-    // connects to host, listens, returns message as soon as one is received.
-    // might not work (maybe)
-    try {
-      Socket hostSocket = await Socket.connect(defaultGateway, serverPort);
-      print("client socket created");
-      hostSocket.listen(
-        (List<int> data) async {
-          hostSocket.write("t");
-          await hostSocket.flush();
-          hostSocket.destroy(); // Host closed connection
-        },
-        onDone: () {
-          hostSocket.destroy(); // Host closed connection
-        },
-        onError: (error) {
-          print('Error: $error');
-          hostSocket.destroy();
-        },
-        cancelOnError: true,
-      );
-    } catch (e) {
-      print('Error connecting to the server: $e');
-    }
+  void handleHostRTTCmd(Socket socket) async {
+    // returns message as soon as one is received.
+    socket.write("RTT");
   }
 
   void listenForHostCmds(Socket hostSocket) {
     hostSocket.listen(
       (List<int> data) async {
-        String receivedData = String.fromCharCodes(data);
-        print('Command: $receivedData');
-        handleHostCaptureCmd();
+        String givenCmd = utf8.decode(data);
+        print('Command: $givenCmd');
+
+        switch (givenCmd) {
+          case "getRTT":
+            handleHostRTTCmd(hostSocket);
+          default:
+            DateTime triggerTime = DateTime.parse(givenCmd).toLocal();
+            print(triggerTime);
+            handleHostCaptureCmd(triggerTime);
+        }
       },
       onDone: () {
         hostSocket.destroy(); // Host closed connection
@@ -389,7 +458,6 @@ class ClientWidgetState extends State<ClientWidget> {
     );
   }
 
-//remove the listeing part from this and put in its own section
   Future<Socket?> establishTCPClientSocket() async {
     try {
       Socket hostSocket = await Socket.connect(defaultGateway, serverPort);
@@ -421,7 +489,21 @@ class ClientWidgetState extends State<ClientWidget> {
     );
   }
 }
-
+//
+//
+///
+//////
+///
+/////
+////
+////
+////
+////
+///
+///
+///
+///
+///
 //Basic Version (works)
 // class MainScreen extends StatelessWidget {
 //   @override
@@ -686,97 +768,97 @@ class MyLanScannerWidgetState extends State<MyLanScannerWidget> {
 }
 
 // A screen that allows users to take a picture using a given camera.
-class TakePictureScreen extends StatefulWidget {
-  const TakePictureScreen({
-    super.key,
-    required this.camera,
-  });
+// class TakePictureScreen extends StatefulWidget {
+//   const TakePictureScreen({
+//     super.key,
+//     required this.camera,
+//   });
 
-  final CameraDescription camera;
+//   final CameraDescription camera;
 
-  @override
-  TakePictureScreenState createState() => TakePictureScreenState();
-}
+//   @override
+//   TakePictureScreenState createState() => TakePictureScreenState();
+// }
 
-class TakePictureScreenState extends State<TakePictureScreen> {
-  late CameraController _controller;
-  late Future<void> _initializeControllerFuture;
+// class TakePictureScreenState extends State<TakePictureScreen> {
+//   late CameraController _controller;
+//   late Future<void> _initializeControllerFuture;
 
-  @override
-  void initState() {
-    super.initState();
-    // To display the current output from the Camera,
-    // create a CameraController.
-    _controller = CameraController(
-      // Get a specific camera from the list of available cameras.
-      widget.camera,
-      ResolutionPreset.medium, // Define the resolution to use.
-    );
+//   @override
+//   void initState() {
+//     super.initState();
+//     // To display the current output from the Camera,
+//     // create a CameraController.
+//     _controller = CameraController(
+//       // Get a specific camera from the list of available cameras.
+//       widget.camera,
+//       ResolutionPreset.medium, // Define the resolution to use.
+//     );
 
-    // Next, initialize the controller. This returns a Future.
-    _initializeControllerFuture = _controller.initialize();
-  }
+//     // Next, initialize the controller. This returns a Future.
+//     _initializeControllerFuture = _controller.initialize();
+//   }
 
-  @override
-  void dispose() {
-    // Dispose of the controller when the widget is disposed.
-    _controller.dispose();
-    super.dispose();
-  }
+//   @override
+//   void dispose() {
+//     // Dispose of the controller when the widget is disposed.
+//     _controller.dispose();
+//     super.dispose();
+//   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Take a picture')),
-      // You must wait until the controller is initialized before displaying the
-      // camera preview. Use a FutureBuilder to display a loading spinner until the
-      // controller has finished initializing.
-      body: FutureBuilder<void>(
-        future: _initializeControllerFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.done) {
-            // If the Future is complete, display the preview.
-            return CameraPreview(_controller);
-          } else {
-            // Otherwise, display a loading indicator.
-            return const Center(child: CircularProgressIndicator());
-          }
-        },
-      ),
-      floatingActionButton: FloatingActionButton(
-        // Provide an onPressed callback.
-        onPressed: () async {
-          // Take the Picture in a try / catch block. If anything goes wrong,
-          // catch the error.
-          try {
-            // Ensure that the camera is initialized.
-            await _initializeControllerFuture;
+//   @override
+//   Widget build(BuildContext context) {
+//     return Scaffold(
+//       appBar: AppBar(title: const Text('Take a picture')),
+//       // You must wait until the controller is initialized before displaying the
+//       // camera preview. Use a FutureBuilder to display a loading spinner until the
+//       // controller has finished initializing.
+//       body: FutureBuilder<void>(
+//         future: _initializeControllerFuture,
+//         builder: (context, snapshot) {
+//           if (snapshot.connectionState == ConnectionState.done) {
+//             // If the Future is complete, display the preview.
+//             return CameraPreview(_controller);
+//           } else {
+//             // Otherwise, display a loading indicator.
+//             return const Center(child: CircularProgressIndicator());
+//           }
+//         },
+//       ),
+//       floatingActionButton: FloatingActionButton(
+//         // Provide an onPressed callback.
+//         onPressed: () async {
+//           // Take the Picture in a try / catch block. If anything goes wrong,
+//           // catch the error.
+//           try {
+//             // Ensure that the camera is initialized.
+//             await _initializeControllerFuture;
 
-            // Attempt to take a picture and get the file `image`
-            // where it was saved.
-            final image = await _controller.takePicture();
+//             // Attempt to take a picture and get the file `image`
+//             // where it was saved.
+//             final image = await _controller.takePicture();
 
-            if (!mounted) return;
+//             if (!mounted) return;
 
-            // If the picture was taken, display it on a new screen.
-            await Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (context) => DisplayPictureScreen(
-                  // Pass the automatically generated path to the DisplayPictureScreen widget.
-                  imagePath: image.path,
-                ),
-              ),
-            );
-          } catch (e) {
-            // If an error occurs, log the error to the console.
-            print(e);
-          }
-        },
-        child: const Icon(Icons.camera_alt),
-      ),
-    );
-  }
-}
+//             // If the picture was taken, display it on a new screen.
+//             await Navigator.of(context).push(
+//               MaterialPageRoute(
+//                 builder: (context) => DisplayPictureScreen(
+//                   // Pass the automatically generated path to the DisplayPictureScreen widget.
+//                   imagePath: image.path,
+//                 ),
+//               ),
+//             );
+//           } catch (e) {
+//             // If an error occurs, log the error to the console.
+//             print(e);
+//           }
+//         },
+//         child: const Icon(Icons.camera_alt),
+//       ),
+//     );
+//   }
+// }
 
 // A widget that displays the picture taken by the user.
 class DisplayPictureScreen extends StatelessWidget {
