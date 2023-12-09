@@ -151,6 +151,11 @@ class HostWidgetState extends State<HostWidget> {
   Stopwatch rttClock = Stopwatch();
   Duration halfRTT = Duration.zero;
 
+  late List<Duration> clockDifSamples = [];
+  late List<bool> clockDifSamplesSign = [];
+  late Duration clockDif;
+  final clockDifReceived = StreamController<void>();
+
 /*  Future Notes:
   in future: if 1) new client connects and 2) 'take-pic' cmd is being 
   sent out at the same time, both will be accessing clientSockets.  Possible 
@@ -162,6 +167,9 @@ class HostWidgetState extends State<HostWidget> {
 
   short-term:
   for now, we just give it a moment before hitting capture, after hitting sync
+
+  the getClockDif function assumes that all samples of the clock offset will 
+  be positive or negative, but not a combo of +/-
 */
 
   @override
@@ -221,20 +229,18 @@ class HostWidgetState extends State<HostWidget> {
     client.listen(
       (List<int> data) async {
         String givenResponse = String.fromCharCodes(data);
-        print('Response: $givenResponse');
 
         switch (givenResponse) {
           case "RTT":
             receiveRTTResponse();
-          default:
-            print("response case not found");
+          default: // clockDiffCmd received
+            receiveClockDiff(givenResponse);
         }
       },
       onDone: () {
         client.destroy(); // Client closed connection
       },
       onError: (error) {
-        print('Error: $error');
         client.destroy();
       },
       cancelOnError: true,
@@ -242,12 +248,6 @@ class HostWidgetState extends State<HostWidget> {
   }
 
   void sendClientCaptureCmds(List<Socket> clientSockets, DateTime triggerTime) {
-    /* eventuall functionality 
-      //things we will receive from client? 
-      // 1) time of flight
-      // 2) images
-    */
-
     String triggerString = triggerTime.toUtc().toIso8601String();
 
     for (var socket in clientSockets) {
@@ -273,6 +273,132 @@ class HostWidgetState extends State<HostWidget> {
     } catch (e) {
       print(e);
     }
+  }
+
+  void sendClockDiffCmd(List<Socket> clientSockets) {
+    /*
+  samples current time and sends it to the client.
+  */
+    DateTime t1 = DateTime.now();
+    String t1String = t1.toUtc().toIso8601String();
+
+    for (var socket in clientSockets) {
+      socket.write(t1String);
+    }
+  }
+
+  Future getEightClockDifs() async {
+    //has to return neg or pos
+    Completer<void> done = Completer<void>();
+    // this segment is just to initialize the subscription to satiate compiler
+    StreamController<void> controller = StreamController<void>();
+    StreamSubscription<void> difReceived = controller.stream.listen((_) {});
+    int difCount = 0;
+
+    difCount = difCount + 1;
+    sendClockDiffCmd(clientSockets);
+
+    difReceived = clockDifReceived.stream.listen((_) {
+      if (difCount < 2) {
+        difCount = difCount + 1;
+        sendClockDiffCmd(clientSockets);
+      } else {
+        difReceived.cancel();
+        return done.complete();
+      }
+    });
+
+    await done.future;
+  }
+
+  void getClockDif() async {
+    clockDifSamples = [];
+    clockDifSamplesSign = [];
+
+    await getEightClockDifs();
+    clockDif = takeAverageDuration();
+    print("samples, signs, average");
+    print(clockDifSamples);
+    print(clockDifSamplesSign);
+    print(clockDif);
+  }
+
+  Duration takeAverageDuration() {
+    Duration avg = Duration.zero;
+    Duration total = Duration.zero;
+
+    for (var durs in clockDifSamples) {
+      total = total + durs;
+    }
+    avg =
+        Duration(milliseconds: total.inMilliseconds ~/ clockDifSamples.length);
+    return avg;
+  }
+
+  void receiveClockDiff(String givenResponse) {
+    /*
+      unpack t1, t2, t3 sample t4.
+    */
+    DateTime t4 = DateTime.now();
+    List<dynamic> timeList = jsonDecode(givenResponse);
+    DateTime t1 = DateTime.parse(timeList[0]).toLocal();
+    DateTime t2 = DateTime.parse(timeList[1]).toLocal();
+    DateTime t3 = DateTime.parse(timeList[2]).toLocal();
+
+    // (T2 - T1)
+    Duration t2_minus_t1_dif = t2.difference(t1);
+    bool t2_minus_t1_pos;
+    if (t1.isAfter(t2)) {
+      t2_minus_t1_pos = false;
+    } else {
+      t2_minus_t1_pos = true;
+    }
+
+    // (T3 - T4)
+    Duration t3_minus_t4_dif = t3.difference(t4);
+    bool t3_minus_t4_pos;
+    if (t4.isAfter(t3)) {
+      t3_minus_t4_pos = false;
+    } else {
+      t3_minus_t4_pos = true;
+    }
+
+    bool result_pos = false; //is the clock offset pos or neg?
+    Duration dif; //final clock difference
+
+    // both pos or both neg
+    if (t2_minus_t1_pos && t3_minus_t4_pos ||
+        !t2_minus_t1_pos && !t3_minus_t4_pos) {
+      dif = t3_minus_t4_dif + t2_minus_t1_dif;
+
+      if (t2_minus_t1_pos) {
+        result_pos = true; //positive
+      } else {
+        result_pos = false; //negative
+      }
+    } else {
+      dif = t3_minus_t4_dif - t2_minus_t1_dif;
+
+      // if T2-T1 larger and positive, result is positive
+      if (t2_minus_t1_dif >= t3_minus_t4_dif && t2_minus_t1_pos) {
+        result_pos = true;
+      } else if (t2_minus_t1_dif >= t3_minus_t4_dif && !t2_minus_t1_pos) {
+        result_pos = false;
+      } else if (t2_minus_t1_dif <= t3_minus_t4_dif && t3_minus_t4_pos) {
+        result_pos = true;
+      } else {
+        result_pos = false;
+      }
+    }
+
+    int totalMilliseconds = dif.inMilliseconds ~/ 2;
+    Duration offset = Duration(milliseconds: totalMilliseconds);
+    // negative difference =  host is behind (slow)
+    // positive difference = host is ahead (fast)
+    clockDifSamples.add(offset); //add it to the current sample set of difs
+    clockDifSamplesSign.add(result_pos); // corresponding pos/neg
+    //in above logic, the +/- nature of ans is is saved in a global variable
+    clockDifReceived.add(null); //notify getClockDif to req another dif sample
   }
 
   DateTime getCaptureTime() {
@@ -323,14 +449,17 @@ class HostWidgetState extends State<HostWidget> {
             FloatingActionButton(
               heroTag: 'captureButton', // Unique tag for the first button
               onPressed: () async {
-                DateTime triggerTime = getCaptureTime();
-                print(triggerTime);
-                sendClientCaptureCmds(clientSockets, triggerTime);
-                triggerTime = triggerTime.subtract(Duration(milliseconds: 840));
-                // remove some delay time to account for the capture mechanism. Make a function later.
+                getClockDif();
 
-                waitUntilCaptureTime(triggerTime);
-                takeLocalPicture();
+                //start here, use global variables to act accordingly
+                // TEST FIRST THOUGH.
+
+                // DateTime triggerTime = getCaptureTime();
+                // sendClientCaptureCmds(clientSockets, triggerTime);
+                // triggerTime = triggerTime.subtract(Duration(milliseconds: 840));
+                // // remove some delay time to account for the capture mechanism. Make a function later.
+                // waitUntilCaptureTime(triggerTime);
+                // takeLocalPicture();
               },
               child: const Icon(Icons.camera_alt),
             ),
@@ -386,7 +515,7 @@ class ClientWidgetState extends State<ClientWidget> {
   Future<String> getGateway() async {
     //finding the default gateway requires native android code (kotlin)
     //to save time, we are manually coding the default gateway
-    return "192.168.81.104";
+    return "192.168.21.117";
   }
 
   void handleHostCaptureCmd(DateTime triggerTime) async {
@@ -408,6 +537,47 @@ class ClientWidgetState extends State<ClientWidget> {
     }
     return;
   }
+
+  /*
+track when the message arrives, before or after the trigger time
+
+We are using external stopwatch to verify, how can we automate this process?
+
+basic counter and some image recog software to do the math automatically. 
+
+Find the necessary timing difference maximum time precision needed for moca.
+
+Whats the sync level required for good mocap.
+
+Whats the standard?
+
+Google precision requried betweeen cameras in mocap.
+
+find somebodies work. 
+
+Future work:
+Automatic verification of accuracy
+
+Algortithm: increaset he number of phones
+              pi precision
+
+VERIFICATION:
+NEEEDED BEFORE PRESENTATION
+What is the minimum required/usbale precision for a given applcaiton:
+casual photography?
+mocap?
+
+
+
+Name of the text?
+Dis System MArtin VAnstin
+
+
+
+We using NTP algortithm:
+
+
+  */
 
   void takeLocalPicture() async {
     try {
@@ -434,19 +604,34 @@ class ClientWidgetState extends State<ClientWidget> {
     socket.write("RTT");
   }
 
+  void handleClockDiffCmd(Socket hostSocket, String t1) {
+    DateTime t2 = DateTime.now(); //time of reception
+
+    List<String> times = [];
+    times.add(t1); //return t1 as is
+    times.add(t2.toUtc().toIso8601String()); //convert t2 to string
+
+    times.add(DateTime.now().toUtc().toIso8601String()); //sample, convert, add
+    String timesString = jsonEncode(times);
+    hostSocket.write(timesString);
+  }
+
   void listenForHostCmds(Socket hostSocket) {
     hostSocket.listen(
       (List<int> data) async {
         String givenCmd = utf8.decode(data);
-        print('Command: $givenCmd');
-
         switch (givenCmd) {
           case "getRTT":
             handleHostRTTCmd(hostSocket);
           default:
-            DateTime triggerTime = DateTime.parse(givenCmd).toLocal();
-            print(triggerTime);
-            handleHostCaptureCmd(triggerTime);
+            // here put: if single time, take pic,
+            //might need to change this to JSON.parse
+            // then if its an array of string vs one string we branch accordngly
+            handleClockDiffCmd(hostSocket, givenCmd);
+
+          // DateTime triggerTime = DateTime.parse(givenCmd).toLocal();
+          // print(triggerTime);
+          // handleHostCaptureCmd(triggerTime);
         }
       },
       onDone: () {
