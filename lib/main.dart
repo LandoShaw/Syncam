@@ -154,7 +154,10 @@ class HostWidgetState extends State<HostWidget> {
   late List<Duration> clockDifSamples = [];
   late List<bool> clockDifSamplesSign = [];
   late Duration clockDif;
+  int difCount = 0;
   final clockDifReceived = StreamController<void>();
+  late StreamSubscription<void> difReceived;
+  Completer<void> done = Completer<void>();
 
 /*  Future Notes:
   in future: if 1) new client connects and 2) 'take-pic' cmd is being 
@@ -179,6 +182,7 @@ class HostWidgetState extends State<HostWidget> {
     getLocalWifiIp().then((String ip) {
       establishTCPServerSocket(ip, portNum);
     });
+    initDifListener();
   }
 
   @override
@@ -288,27 +292,25 @@ class HostWidgetState extends State<HostWidget> {
   }
 
   Future getEightClockDifs() async {
-    //has to return neg or pos
-    Completer<void> done = Completer<void>();
-    // this segment is just to initialize the subscription to satiate compiler
-    StreamController<void> controller = StreamController<void>();
-    StreamSubscription<void> difReceived = controller.stream.listen((_) {});
-    int difCount = 0;
+    done = Completer<void>();
+    difCount = 0;
 
+    // trigger initDifListener by sending first dif req
     difCount = difCount + 1;
     sendClockDiffCmd(clientSockets);
 
+    await done.future;
+  }
+
+  void initDifListener() {
     difReceived = clockDifReceived.stream.listen((_) {
       if (difCount < 2) {
         difCount = difCount + 1;
         sendClockDiffCmd(clientSockets);
       } else {
-        difReceived.cancel();
         return done.complete();
       }
     });
-
-    await done.future;
   }
 
   void getClockDif() async {
@@ -450,6 +452,8 @@ class HostWidgetState extends State<HostWidget> {
               heroTag: 'captureButton', // Unique tag for the first button
               onPressed: () async {
                 getClockDif();
+
+                // take the largest RTT, or do a sliding average, or exponential avg
 
                 //start here, use global variables to act accordingly
                 // TEST FIRST THOUGH.
